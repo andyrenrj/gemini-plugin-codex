@@ -1,0 +1,28 @@
+{
+  "name": "gemini",
+  "version": "0.1.0+codex.20260924161208",
+  "description": "Independent Gemini code and document reviews through your Antigravity subscription.",
+  "author": {
+    "name": "Jieren"
+  },
+  "skills": "./skills/",
+  "interface": {
+    "displayName": "Gemini Review",
+    "shortDescription": "Gemini \u72ec\u7acb\u5ba1\u67e5\u4ee3\u7801\u3001\u8ba1\u5212\u4e0e\u89c4\u683c\u3002",
+    "longDescription": "\u901a\u8fc7\u5df2\u767b\u5f55\u7684 Antigravity CLI \u8fd0\u884c Gemini \u5ba1\u67e5\u3002\u652f\u6301\u56fa\u5b9a\u5ba1\u67e5\u8303\u56f4\u3001\u540e\u53f0\u4efb\u52a1\u3001\u7ed3\u6784\u5316\u62a5\u544a\u548c\u8f93\u51fa\u8d85\u9650\u6062\u590d\u3002\u9996\u7248\u652f\u6301 macOS\u3002",
+    "developerName": "Jieren",
+    "category": "Developer Tools",
+    "capabilities": [],
+    "defaultPrompt": [
+      "\u7528 Gemini \u5ba1\u67e5\u5f53\u524d\u672a\u63d0\u4ea4\u6539\u52a8\u3002",
+      "\u7528 Gemini \u5ba1\u67e5\u8fd9\u4efd\u5b9e\u65bd\u8ba1\u5212\u3002",
+      "\u67e5\u770b\u6700\u8fd1\u4e00\u6b21 Gemini \u5ba1\u67e5\u7ed3\u679c\u3002"
+    ]
+  },
+  "license": "Apache-2.0",
+  "keywords": [
+    "gemini",
+    "review",
+    "antigravity"
+  ]
+}

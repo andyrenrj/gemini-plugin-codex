@@ -1,0 +1,7 @@
+Gemini Review for Codex
+Copyright 2026 Jieren
+
+Independent implementation inspired by the architecture of openai/codex-plugin-cc:
+https://github.com/openai/codex-plugin-cc
+Reference revision db52e28f4d9ded852ab3942cea316258ae4ef346 (version 1.0.6).
+The reference project is Copyright 2026 OpenAI, licensed under Apache-2.0.
