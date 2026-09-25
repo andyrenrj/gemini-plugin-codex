@@ -1,5 +1,7 @@
 # Gemini Review for Codex
 
+English | [简体中文](README.zh-CN.md)
+
 A Codex plugin for independent Gemini reviews of code changes, implementation plans, and specifications. It runs through the Antigravity CLI using your existing sign-in and subscription.
 
 ## Requirements
