@@ -1,6 +1,6 @@
 {
   "name": "gemini",
-  "version": "0.1.0+codex.20260924161208",
+  "version": "0.1.0+codex.20260925025102",
   "description": "Independent Gemini code and document reviews through your Antigravity subscription.",
   "author": {
     "name": "Jieren"
@@ -17,7 +17,8 @@
       "\u7528 Gemini \u5ba1\u67e5\u5f53\u524d\u672a\u63d0\u4ea4\u6539\u52a8\u3002",
       "\u7528 Gemini \u5ba1\u67e5\u8fd9\u4efd\u5b9e\u65bd\u8ba1\u5212\u3002",
       "\u67e5\u770b\u6700\u8fd1\u4e00\u6b21 Gemini \u5ba1\u67e5\u7ed3\u679c\u3002"
-    ]
+    ],
+    "websiteURL": "https://github.com/andyrenrj/gemini-plugin-codex"
   },
   "license": "Apache-2.0",
   "keywords": [
