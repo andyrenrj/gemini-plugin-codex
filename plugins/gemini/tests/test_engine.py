@@ -59,27 +59,42 @@ class EngineTests(unittest.TestCase):
 import json, os, pathlib, subprocess, sys, time
 root = pathlib.Path(__file__).resolve().parent
 counter = root / "counter"
-index = int(counter.read_text()) if counter.exists() else 0
-counter.write_text(str(index + 1))
 scenario = json.loads((root / "scenario.json").read_text())
-step = scenario[min(index, len(scenario) - 1)]
-payload = sys.stdin.read()
-(root / f"call-{index + 1}.json").write_text(json.dumps({"argv": sys.argv, "input": payload}))
-if step.get("spawn_child"):
-    child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"],
-                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-    (root / "child.pid").write_text(str(child.pid))
-if "stderr" in step:
-    print(step["stderr"], file=sys.stderr, flush=True)
-if "before_sleep" in step:
-    print(json.dumps(step["before_sleep"]), flush=True)
-if step.get("sleep"):
-    time.sleep(step["sleep"])
-if "raw" in step:
-    sys.stdout.write(step["raw"])
-else:
-    print(json.dumps({"event": "result", "result": step["result"]}), flush=True)
-sys.exit(step.get("exit", 0))
+with (root / "processes.jsonl").open("a") as log:
+    log.write(json.dumps({"pid": os.getpid(), "argv": sys.argv}) + "\n")
+initial = int(counter.read_text()) if counter.exists() else 0
+print(json.dumps({"event": "init", "init": scenario[min(initial, len(scenario) - 1)].get("init", {})}), flush=True)
+for payload in sys.stdin:
+    index = int(counter.read_text()) if counter.exists() else 0
+    counter.write_text(str(index + 1))
+    step = scenario[min(index, len(scenario) - 1)]
+    (root / f"call-{index + 1}.json").write_text(json.dumps({"argv": sys.argv, "input": payload, "pid": os.getpid()}))
+    if step.get("spawn_child"):
+        child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"],
+                                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        (root / "child.pid").write_text(str(child.pid))
+    if "stderr" in step:
+        print(step["stderr"], file=sys.stderr, flush=True)
+    if "before_sleep" in step:
+        print(json.dumps(step["before_sleep"]), flush=True)
+    if step.get("sleep"):
+        time.sleep(step["sleep"])
+    if "raw" in step:
+        sys.stdout.write(step["raw"])
+        sys.stdout.flush()
+    elif "fragments" in step:
+        for fragment in step["fragments"]:
+            sys.stdout.write(fragment)
+            sys.stdout.flush()
+            time.sleep(0.01)
+    else:
+        print(json.dumps({"event": "result", "result": step["result"]}), flush=True)
+    if step.get("after_sleep"):
+        time.sleep(step["after_sleep"])
+    if "late_stderr" in step:
+        print(step["late_stderr"], file=sys.stderr, flush=True)
+    if "exit" in step:
+        sys.exit(step["exit"])
 ''', encoding="utf-8")
         self.agy.chmod(0o700)
         self.lookup = patch.object(engine.shutil, "which", side_effect=lambda name: str(self.root / name))
@@ -243,6 +258,8 @@ sys.exit(step.get("exit", 0))
         argv = json.loads((self.root / "call-2.json").read_text())["argv"]
         self.assertEqual(argv[-2:], ["--conversation", "conversation-one"])
         self.assertEqual(report["attempts"][0]["error_kind"], "output_limit")
+        self.assertEqual(len(report["sessions"]), 2)
+        self.assertNotEqual(report["attempts"][0]["child_pid"], report["attempts"][1]["child_pid"])
 
     def test_continuation_quota_error_does_not_split_or_retry(self):
         self.prepare([limit("c1"), {"result": {"status": "ERROR", "error": "quota exhausted"}}],
@@ -265,6 +282,11 @@ sys.exit(step.get("exit", 0))
         halves = engine.split_material(material)
         self.assertEqual("".join(halves), material)
         self.assertEqual(len(report["units"][0]["children"]), 2)
+        self.assertEqual(len(report["sessions"]), 3)
+        self.assertEqual([item["session_id"] for item in report["attempts"]],
+                         ["session-1", "session-2", "session-3", "session-3", "session-3"])
+        processes = [json.loads(line) for line in (self.root / "processes.jsonl").read_text().splitlines()]
+        self.assertNotIn("--conversation", processes[2]["argv"])
 
     def test_split_recursion_is_bounded(self):
         self.prepare([limit()], units=[{"label": "large", "text": "abcdefghij\n" * 4000}])
@@ -307,6 +329,104 @@ sys.exit(step.get("exit", 0))
         self.assertIn("cross-file interactions", prompt)
         self.assertIn("snapshot is authoritative", prompt)
 
+    def test_all_batches_and_integration_reuse_one_stream_process(self):
+        steps = [success(usage={"total_tokens": value}, duration_seconds=value / 10, num_turns=i)
+                 for i, value in enumerate((10, 20, 30, 40), 1)]
+        steps[0]["init"] = {"conversation_id": "init-conversation", "model": "observed-model"}
+        steps[0].update(after_sleep=0.08, late_stderr="late first-round diagnostic")
+        steps[-1].update(after_sleep=0.05, late_stderr="late final-round diagnostic")
+        self.prepare(steps, units=[{"label": str(i), "text": f"file-{i}:1 change"} for i in range(3)])
+        code, report = self.run_job()
+        self.assertEqual(code, 0)
+        processes = [json.loads(line) for line in (self.root / "processes.jsonl").read_text().splitlines()]
+        self.assertEqual(len(processes), 1)
+        self.assertNotIn("--conversation", processes[0]["argv"])
+        attempts = report["attempts"]
+        self.assertEqual([item["session_turn"] for item in attempts], [1, 2, 3, 4])
+        self.assertEqual({item["session_id"] for item in attempts}, {"session-1"})
+        self.assertEqual({item["conversation_id"] for item in attempts}, {"init-conversation"})
+        self.assertEqual([item["usage"]["total_tokens"] for item in attempts], [10, 20, 30, 40])
+        self.assertEqual([item["duration_seconds"] for item in attempts], [1, 2, 3, 4])
+        self.assertTrue(all(item["usage_may_be_cumulative"] for item in attempts))
+        self.assertTrue(all(item["process_exit"] == 0 for item in attempts))
+        for attempt in attempts:
+            events = [json.loads(line) for line in (self.job / attempt["events"]).read_text().splitlines()]
+            self.assertEqual(sum(event["event"] == "result" for event in events), 1)
+        session = report["sessions"][0]
+        self.assertEqual({item["stderr"] for item in attempts}, {session["stderr"]})
+        self.assertEqual({item["stderr_scope"] for item in attempts}, {"session"})
+        self.assertEqual(list(self.job.glob("attempt-*.stderr.log")), [])
+        diagnostics = (self.job / session["stderr"]).read_text()
+        self.assertIn("late first-round diagnostic", diagnostics)
+        self.assertIn("late final-round diagnostic", diagnostics)
+        self.assertEqual(session["conversation_id"], "init-conversation")
+        self.assertEqual(session["usage"], {"total_tokens": 40})
+        events = [json.loads(line) for line in (self.job / session["events"]).read_text().splitlines()]
+        self.assertEqual(sum(event["event"] == "init" for event in events), 1)
+
+    def test_fragmented_ndjson_result_is_reassembled(self):
+        event = json.dumps({"event": "result", "result": success()["result"]}, ensure_ascii=False) + "\n"
+        self.prepare([{"fragments": [event[:19], event[19:71], event[71:]]}])
+        code, report = self.run_job()
+        self.assertEqual(code, 0)
+        self.assertEqual(report["status"], "completed")
+
+    def test_eof_without_result_is_failure_even_with_exit_zero(self):
+        self.prepare([{"raw": "", "exit": 0}])
+        code, report = self.run_job()
+        self.assertEqual(code, 1)
+        self.assertEqual(report["attempts"][0]["error_kind"], "process")
+        self.assertIn("without a result", report["error"])
+
+    def test_truncated_ndjson_at_eof_is_not_carried_to_another_turn(self):
+        self.prepare([{"raw": '{"event":"result","result":', "exit": 0}])
+        code, report = self.run_job()
+        self.assertEqual(code, 1)
+        self.assertEqual(report["attempts"][0]["error_kind"], "malformed")
+        self.assertIn("truncated", report["error"])
+
+    def test_duplicate_result_cannot_become_the_next_batch_result(self):
+        event = json.dumps({"event": "result", "result": success()["result"]}) + "\n"
+        self.prepare([{"raw": event + event}])
+        code, report = self.run_job()
+        self.assertEqual(code, 1)
+        self.assertEqual(report["attempts"][0]["error_kind"], "malformed")
+        self.assertEqual(report["coverage"]["completed"], 0)
+
+    def test_stale_cumulative_turn_counter_is_rejected(self):
+        self.prepare([success(num_turns=1), success(num_turns=1)],
+                     units=[{"label": "a", "text": "a:1 change"}, {"label": "b", "text": "b:1 change"}])
+        code, report = self.run_job()
+        self.assertEqual(code, 1)
+        self.assertEqual(report["status"], "partial")
+        self.assertEqual(report["attempts"][1]["error_kind"], "malformed")
+        self.assertIn("Stale result", report["error"])
+
+    def test_schema_is_validated_on_each_turn_before_integration(self):
+        self.prepare([success(), success({"complete": True})],
+                     units=[{"label": "a", "text": "a:1 change"}, {"label": "b", "text": "b:1 change"}])
+        code, report = self.run_job()
+        self.assertEqual(code, 1)
+        self.assertEqual(report["status"], "partial")
+        self.assertEqual(report["coverage"]["completed"], 1)
+        self.assertEqual(report["coverage"]["integration"], "not_run")
+        self.assertEqual(report["attempts"][1]["error_kind"], "schema")
+        self.assertEqual(len(report["attempts"]), 2)
+        self.assertEqual(len(report["sessions"]), 1)
+
+    def test_second_turn_timeout_keeps_first_result_and_cleans_processes(self):
+        self.prepare([success(usage={"total_tokens": 10}), {"sleep": 30, "spawn_child": True}],
+                     units=[{"label": "a", "text": "a:1 change"}, {"label": "b", "text": "b:1 change"}],
+                     timeout=1.5)
+        code, report = self.run_job()
+        self.assertEqual(code, 1)
+        self.assertEqual(report["coverage"]["completed"], 1)
+        self.assertEqual(report["attempts"][1]["error_kind"], "timeout")
+        self.assertIsNone(report["attempts"][1]["usage"])
+        self.assertEqual(len(report["sessions"]), 1)
+        self.assert_process_gone(int((self.root / "child.pid").read_text()))
+        self.assert_process_gone(report["sessions"][0]["pid"])
+
     def test_one_failed_unit_cannot_be_clean_and_skips_integration(self):
         self.prepare([success(), {"raw": "oops\n"}],
                      units=[{"label": "a", "text": "a:1 change\n"}, {"label": "b", "text": "b:1 change\n"}])
@@ -337,6 +457,7 @@ sys.exit(step.get("exit", 0))
         self.assertEqual(len(report["attempts"]), 1)
         self.assertEqual(report["attempts"][0]["error_kind"], "process")
         self.assertIn("unsupported CLI argument", report["error"])
+        self.assertIn("session stderr (may include other turns)", report["error"])
         self.assertEqual(report["unreviewed_units"], ["b"])
 
     def test_timeout_kills_child_process_group_and_keeps_stream(self):

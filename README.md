@@ -73,21 +73,23 @@ python3 scripts/gemini.py cancel JOB_ID --repo /path/to/project
 
 ## How reviews work
 
-Each job captures its input and records a content hash. The runtime splits large files into batches of roughly 18,000 characters, preserving source line numbers. This threshold controls input batching; model token limits are separate.
+Each job captures its input and records a content hash. Small multi-file changes are reviewed together within an 18,000-character batching budget. Larger changes are ordered by path, with uniquely matched implementation and test files kept together when they fit. This is a filename heuristic, not dependency analysis. Large files are split while preserving file markers and source line numbers; a single oversized line stays intact and may exceed the budget. Model token limits are separate.
 
-After successful batch reviews, an integration pass checks interactions across batches and files. It can read the original snapshots, which are protected against writes. If a response exceeds the output token limit, the runtime first requests a shorter continuation using the exact conversation ID. If that also exceeds the limit, eligible batches are split further within a bounded retry budget.
+Normal batch reviews share one persistent Antigravity process and conversation. Later turns can reuse source context already read. A single batch includes checks of interactions among its files; jobs with multiple batches or recovery splits also run an integration pass, using the existing conversation and reading original snapshots only where needed. Snapshots remain protected against writes.
+
+If a response exceeds the output token limit, the runtime closes the failed session and requests a shorter continuation using its exact conversation ID. If that also exceeds the limit, eligible batches are split further within a bounded retry budget and reviewed in a fresh conversation.
 
 Each model response contains at most eight findings. If that would leave confirmed issues unreported, the model must mark the response incomplete. The final report combines findings across batches without imposing an eight-finding total. Codex then checks the evidence, locations, and suggested fixes against the source.
 
 ### Results and diagnostics
 
-Jobs are stored in `~/.cache/gemini-codex/jobs/<job-id>/`. Each directory contains the captured input, raw response streams, errors, model usage, and final JSON and Markdown reports. Access to the job directory is restricted to the current user. These files may contain project code and are not uploaded to the plugin marketplace. Set `GEMINI_PLUGIN_STATE` to use a different job directory, such as for testing.
+Jobs are stored in `~/.cache/gemini-codex/jobs/<job-id>/`. Each directory contains the captured input, raw response streams, errors, model usage, and final JSON and Markdown reports. Attempts are linked to their persistent session. Standard-error logs belong to the whole session because delayed diagnostics cannot reliably be assigned to one turn. Provider usage counters can accumulate across turns and are preserved without summing them. Access to the job directory is restricted to the current user. These files may contain project code and are not uploaded to the plugin marketplace. Set `GEMINI_PLUGIN_STATE` to use a different job directory, such as for testing.
 
 `completed` means all required batches and the integration pass returned valid, complete reports. It does not prove that the code is correct. `partial`, `failed`, `cancelled`, and `interrupted` indicate incomplete reviews. A CLI process that exits with code `0` but returns model status `ERROR` is treated as a failure.
 
 ## Permissions and limitations
 
-The runtime uses macOS `sandbox-exec` to deny writes to the project, Git metadata, review snapshots, and explicitly selected documents. It also runs Antigravity in plan mode with terminal sandboxing. Antigravity can still write its own authentication and session data. The plugin does not change global permission settings or enable blanket tool approval.
+The runtime uses macOS `sandbox-exec` to deny writes to the project, Git metadata, review snapshots, and explicitly selected documents. It enables Antigravity terminal sandboxing and instructs the reviewer to use only relevant read tools. The project write guard is enforced by the operating system. Antigravity can still write its own authentication and session data. The plugin does not change global permission settings or enable blanket tool approval.
 
 Review material is sent to Google through your signed-in Antigravity account. Gemini can read relevant source context in the selected repository. The runtime explicitly registers the project and snapshot directories as workspace paths.
 
@@ -96,6 +98,8 @@ Input capture excludes credential-like paths, binary files, submodules, and untr
 For branch and commit reviews, captured changes remain the authoritative evidence when the current working tree differs. Missing historical context is reported as a limitation.
 
 Output constraints cannot eliminate the model's internal reasoning token limits. Retries are bounded; persistent failures retain completed work and diagnostics. Splitting and integration checks can still miss issues across files.
+
+Validation results and their limits are recorded in [performance notes](docs/performance.md).
 
 ## Development
 

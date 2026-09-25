@@ -66,8 +66,66 @@ def make_units(label, rows, limit=BATCH_CHARS):
         size += len(row) + 1
     if current:
         chunks.append(current)
-    return [{"label": f"{label} ({i + 1}/{len(chunks)})", "text": header + "\n".join(chunk)}
+    return [{"label": f"{label} ({i + 1}/{len(chunks)})", "text": header + "\n".join(chunk),
+             "paths": [label]}
             for i, chunk in enumerate(chunks)]
+
+
+def pack_units(units, limit=BATCH_CHARS):
+    """Pack nearby paths and unambiguous implementation/test pairs, without parsing code.
+
+    Existing file chunks retain their headers and order. A single row longer than
+    the budget remains intact, so that unit can still exceed the character limit.
+    """
+    files = {}
+    for unit in units:
+        files.setdefault(unit["paths"][0], []).append(unit)
+    implementations, tests = {}, {}
+    for path in files:
+        file = Path(path)
+        stem = file.stem.casefold()
+        name = re.sub(r"^(?:test|spec)[_-]|[._-](?:test|spec)$", "", stem)
+        is_test = name != stem or any(part.casefold() in {"test", "tests", "__tests__"}
+                                     for part in file.parts[:-1])
+        if is_test:
+            tests[path] = name
+        else:
+            implementations.setdefault(name, []).append(path)
+    anchors = {path: path for path in files}
+    for path, name in tests.items():
+        matches = implementations.get(name, [])
+        if len(matches) == 1:
+            anchors[path] = matches[0]
+    groups = {}
+    for path in sorted(files):
+        groups.setdefault(anchors[path], []).append(path)
+
+    batches, current, size = [], [], 0
+
+    def flush():
+        nonlocal current, size
+        if current:
+            batches.append({
+                "label": " + ".join(unit["label"] for unit in current),
+                "text": "\n\n".join(unit["text"] for unit in current),
+                "paths": list(dict.fromkeys(path for unit in current for path in unit["paths"])),
+            })
+            current, size = [], 0
+
+    for anchor in sorted(groups):
+        paths = sorted(groups[anchor], key=lambda path: (path != anchor, path))
+        group = [unit for path in paths for unit in files[path]]
+        group_size = sum(len(unit["text"]) for unit in group) + 2 * (len(group) - 1)
+        # Keep a matching implementation and its tests together when they fit.
+        if current and group_size <= limit and size + 2 + group_size > limit:
+            flush()
+        for unit in group:
+            if current and size + 2 + len(unit["text"]) > limit:
+                flush()
+            size += (2 if current else 0) + len(unit["text"])
+            current.append(unit)
+    flush()
+    return batches
 
 
 def capture_review(path, base=None, commit=None, paths=None):
@@ -149,7 +207,7 @@ def capture_review(path, base=None, commit=None, paths=None):
     for flag in ("--absolute-git-dir", "--git-common-dir"):
         p = Path(git(repo, "rev-parse", flag).stdout.decode().strip())
         protected.append(str((repo / p).resolve() if not p.is_absolute() else p.resolve()))
-    result = {"repo": str(repo), "kind": "review", "scope": scope, "units": units,
+    result = {"repo": str(repo), "kind": "review", "scope": scope, "units": pack_units(units),
               "omitted": omitted, "files": files, "captured": captured, "head": head,
               "protected_paths": sorted(set(protected))}
     result["snapshot_sha256"] = hashlib.sha256(json.dumps(captured, sort_keys=True).encode()).hexdigest()
@@ -176,5 +234,5 @@ def capture_audit(path, documents, kind):
         captured.append({"path": str(file), "sha256": hashlib.sha256(data).hexdigest()})
         protected.append(str(file))
     return {"repo": str(repo), "kind": kind, "scope": f"{kind} audit: " + ", ".join(x["path"] for x in captured),
-            "units": units, "omitted": [], "captured": captured, "protected_paths": protected,
+            "units": pack_units(units), "omitted": [], "captured": captured, "protected_paths": protected,
             "snapshot_sha256": hashlib.sha256(json.dumps(captured, sort_keys=True).encode()).hexdigest()}

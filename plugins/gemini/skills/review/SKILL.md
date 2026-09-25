@@ -21,7 +21,7 @@ Example:
 python3 "<plugin-root>/scripts/gemini.py" review --repo "<project>" --base main --background
 ```
 
-The runtime captures inputs, divides large files into numbered batches, protects the project from writes, saves raw responses, and performs a cross-file pass after successful batch reviews. Its 18,000-character batching threshold is a conservative heuristic, not a model limit. Credential-like paths, binaries and submodules are explicitly omitted; check the reported omissions.
+The runtime captures inputs, combines small related files within an 18,000-character budget, and splits large files while preserving source line numbers. Normal batches share one persistent conversation. A single batch includes cross-file checks; multiple batches and recovery splits also receive an integration pass. The runtime protects the project from writes and saves raw responses. The batching budget is a heuristic, not a model limit; oversized single lines remain intact. Do not manually launch a separate review per file. Credential-like paths, binaries and submodules are explicitly omitted; check the reported omissions.
 
 Use `--background` when the user asks for background work. Otherwise wait for completion; a shell tool may yield a process session that you should resume. Do not launch duplicate reviews while waiting. For a background job, report the job ID and use the bundled status/result/cancel skills to manage it.
 

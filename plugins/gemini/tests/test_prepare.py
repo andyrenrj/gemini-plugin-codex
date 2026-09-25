@@ -65,6 +65,12 @@ class PrepareTests(unittest.TestCase):
         result = prepare.capture_review(self.repo)
 
         self.assertEqual(result["files"], ["both.py", "new.py", "staged.py", "unstaged.py"])
+        self.assertEqual(len(result["units"]), 1)
+        self.assertEqual(result["units"][0]["paths"], result["files"])
+        for captured in result["captured"]:
+            single_file = prepare.capture_review(self.repo, paths=[captured["path"]])
+            self.assertEqual(single_file["captured"], [captured])
+            self.assertIn(single_file["units"][0]["text"], self.text(result))
         for content in ("new staged", "new unstaged", "index change", "worktree change", "untracked content"):
             self.assertIn(content, self.text(result))
         self.assertEqual(status_before, self.git("status", "--porcelain=v1"))
@@ -206,6 +212,8 @@ class PrepareTests(unittest.TestCase):
         second = self.write("spec.md", "# Spec\nSecond requirement\n")
         result = prepare.capture_audit(self.repo, [first, second], "plan")
         self.assertEqual(result["kind"], "plan")
+        self.assertEqual(len(result["units"]), 1)
+        self.assertEqual(result["units"][0]["paths"], [str(first), str(second)])
         self.assertEqual([f["path"] for f in result["captured"]], [str(first), str(second)])
         self.assertIn("line:2 First requirement", self.text(result))
         self.assertIn("line:2 Second requirement", self.text(result))
@@ -252,6 +260,60 @@ class PrepareTests(unittest.TestCase):
 
             self.assertEqual(result["protected_paths"], [str(plain), str(document)])
             self.assertIn("line:1 # Plain document", self.text(result))
+
+    def test_batch_budget_counts_file_headers_and_separators(self):
+        units = prepare.make_units("a.py", ["old:- new:1 +a"]) + prepare.make_units("b.py", ["old:- new:1 +b"])
+        exact_limit = sum(len(unit["text"]) for unit in units) + 2
+        combined = prepare.pack_units(units, limit=exact_limit)
+        self.assertEqual(len(combined), 1)
+        self.assertEqual(len(combined[0]["text"]), exact_limit)
+        split = prepare.pack_units(units, limit=exact_limit - 1)
+        self.assertEqual(len(split), 2)
+        self.assertEqual([unit["text"] for unit in split], [unit["text"] for unit in units])
+
+    def test_batching_preserves_all_numbered_chunks_and_file_boundaries(self):
+        patch = "\n".join([
+            "@@ -40,3 +50,3 @@", " context a", "-old a", "+new a", " after a",
+            "@@ -90 +100 @@", "-old b", "+new b",
+        ])
+        source_units = prepare.make_units("src/large.py", prepare.numbered_patch(patch), limit=95)
+        source_units += prepare.make_units("src/nearby.py", ["old:- new:1 +nearby content"], limit=95)
+        self.assertGreater(len(source_units), 2)
+        batches = prepare.pack_units(source_units, limit=130)
+        combined = "\n\n".join(unit["text"] for unit in batches)
+        self.assertEqual(combined, "\n\n".join(unit["text"] for unit in source_units))
+        self.assertTrue(all(len(unit["text"]) <= 130 for unit in batches))
+        for source in source_units:
+            self.assertEqual(sum(source["label"] in unit["label"] for unit in batches), 1)
+        self.assertIn("old:90 new:- -old b", combined)
+        self.assertIn("old:- new:100 +new b", combined)
+
+    def test_unique_implementation_and_tests_stay_together_within_budget(self):
+        paths = ["src/0.txt", "src/alpha.py", "src/beta.py", "tests/test_alpha.py", "tests/test_beta.py"]
+        units = [unit for path in paths for unit in prepare.make_units(path, ["line:1 content"])]
+        pair_size = len(units[1]["text"]) + 2 + len(units[3]["text"])
+        batches = prepare.pack_units(units, limit=pair_size)
+        self.assertEqual([unit["paths"] for unit in batches], [
+            ["src/0.txt"], ["src/alpha.py", "tests/test_alpha.py"], ["src/beta.py", "tests/test_beta.py"],
+        ])
+        self.assertEqual(batches, prepare.pack_units(list(reversed(units)), limit=pair_size))
+
+    def test_ambiguous_test_names_keep_path_order(self):
+        paths = ["lib/shared.py", "src/shared.py", "tests/test_shared.py"]
+        units = [unit for path in paths for unit in prepare.make_units(path, ["line:1 content"])]
+        batches = prepare.pack_units(list(reversed(units)))
+        self.assertEqual(len(batches), 1)
+        self.assertEqual(batches[0]["paths"], paths)
+
+    def test_oversized_single_line_is_retained_as_its_own_batch(self):
+        long_line = "old:- new:1 +" + "x" * 200
+        units = prepare.make_units("a.py", [long_line], limit=80)
+        units += prepare.make_units("b.py", ["old:- new:1 +small"], limit=80)
+        batches = prepare.pack_units(units, limit=80)
+        self.assertEqual(len(batches), 2)
+        self.assertGreater(len(batches[0]["text"]), 80)
+        self.assertEqual(batches[0]["text"], units[0]["text"])
+        self.assertIn(long_line, batches[0]["text"])
 
 
 if __name__ == "__main__":
